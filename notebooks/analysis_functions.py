@@ -1,10 +1,8 @@
-import os
 import pandas as pd
 import requests
 import json
 import numpy as np
 import scipy.stats as stats
-
 
 def reformat_SPF_to_long(data: pd.DataFrame, cold_analysis: bool) -> pd.DataFrame:
     """Converts the spfh_analysis csv from 1 row per home to 1 row per home per and per spf_type
@@ -81,13 +79,16 @@ def stats_by_hp_and_SPF_type(data: pd.DataFrame, by: str = "HP_Type", rounding: 
     stats_table = pd.DataFrame()
     rounding = rounding
 
+    data = data.sort_values("SPF_type")
+    data = pd.concat([data[data["HP_Type"] == "LT_ASHP"], data[data["HP_Type"] == "HT_ASHP"], data[data["HP_Type"] == "Hybrid"], data[data["HP_Type"] == "GSHP"]])
+
     for by_type in data[by].unique():
         homes_output_hp = data[data[by] == by_type]
         for SPF_type in data["SPF_type"].unique():
             homes_output_split_SPF_type = homes_output_hp[homes_output_hp["SPF_type"] == SPF_type]
             mean = np.mean(homes_output_split_SPF_type["SPF_value"])
             mean_confidence = stats.t.interval(
-                alpha=0.95,
+                confidence=0.95,
                 df=len(homes_output_split_SPF_type) - 1,
                 loc=np.mean(homes_output_split_SPF_type["SPF_value"]),
                 scale=stats.sem(homes_output_split_SPF_type["SPF_value"]),
@@ -181,7 +182,7 @@ def filter_homes_within_threshold(
     return homes_output_within_threshold
 
 
-def add_supplementary_data(data: pd.DataFrame) -> pd.DataFrame:
+def add_supplementary_data(data: pd.DataFrame, USMART_KEY_ID, USMART_KEY_SECRET) -> pd.DataFrame:
     """Adds supplementary data from usmart. Joins on Property_ID.
 
     Args:
@@ -191,13 +192,13 @@ def add_supplementary_data(data: pd.DataFrame) -> pd.DataFrame:
         pd.DataFrame: Dataframe with data supplemented
     """
     urls = [
-        "https://api.usmart.io/org/92610836-6c2b-4a26-a0a0-b903bde0dc46/231dd812-ed7f-41b4-bbe2-c0929ca95299/latest/urql?limit(-1)"
+        "https://api.usmart.io/org/92610836-6c2b-4a26-a0a0-b903bde0dc46/ad782c41-9431-4850-b23f-e7a9605fa6b3/latest/urql?limit(-1)"
     ]
 
     headers = {
         "cache-control": "no-cache",
-        "api-key-id": os.environ["USMART_KEY_ID"],
-        "api-key-secret": os.environ["USMART_KEY_SECRET"],
+        "api-key-id": USMART_KEY_ID,
+        "api-key-secret": USMART_KEY_SECRET,
     }
 
     db = []
@@ -229,6 +230,7 @@ def add_supplementary_data(data: pd.DataFrame) -> pd.DataFrame:
                 "MCS_SHLoad",
                 "Postcode_1",
                 "HP_Refrigerant",
+                "HP_Installed_Detail"
             ]
         ],
         on="Property_ID",
@@ -298,3 +300,45 @@ def add_supplementary_data(data: pd.DataFrame) -> pd.DataFrame:
     data.columns = data.columns.str.replace("SPFh", "SPFH")
 
     return data
+
+def iqr_confidence_interval(df, metric, confidence_level=0.95, digits=1):
+    """
+    Derive the mean, median, IQR and specific confidence level for a sample
+    """
+
+    # - Printing metric:
+    print(metric)
+    # - Printing sample size:
+    print("Sample size: "+str(df.shape[0]))
+    
+    ## Calculating the 95% Confidence Interval (CI) for the mean:
+    sample_mean = df[metric].mean()
+    sample_median = df[metric].median()
+    # - Deriving degrees of freedom
+    degree_freedom = df.shape[0]-1
+    #
+    # - And the standard deviation and margin of error (only with degrees of freedom > 0):
+    if (degree_freedom > 0):
+        sample_std = stats.sem(df[metric])
+        margin_of_error = stats.t.ppf((1+confidence_level)/2, df=degree_freedom)*sample_std
+    else:
+        sample_std = np.nan
+        margin_of_error = 0
+    #
+    # - Deriving the lower and upper bounds of the CI:
+    ci_lower = round(sample_mean - margin_of_error,digits)
+    ci_upper = round(sample_mean + margin_of_error,digits)
+    #
+    # - Printing results:
+    print("Mean ["+str(int(confidence_level*100))+"% CI] :"+str(round(sample_mean,digits))+ " ["+str(ci_lower)+", "+str(ci_upper)+"]")
+    
+    ## Deriving the IQR but printing Q1 and Q3:
+    q1 = df[metric].quantile(0.25)
+    q3 = df[metric].quantile(0.75)
+    #
+    iqr = q3 - q1
+    #
+    print("Median [IQR] "+str(round(sample_median,digits))+ " ["+str(round(q1,digits))+", "+str(round(q3,digits))+"]")
+    print("")
+
+    return sample_mean, ci_lower, ci_upper, sample_median, iqr

@@ -22,7 +22,7 @@ sensors_may_swap = [
 ]
 
 normal_ranges = {
-    "Internal_Air_Temperature": {"max": 40, "min": 0},
+    "Internal_Air_Temperature": {"max": 40, "min": 2},
     "External_Air_Temperature": {"max": 40.3, "min": -27.2},
     "Heat_Pump_Heating_Flow_Temperature": {"max": 80, "min": 5},
     "Heat_Pump_Return_Temperature": {"max": 80, "min": 5},
@@ -66,7 +66,8 @@ def classify_and_predict(location_out: str, files_list: str):
     # We expect mean counts per day of 720*2 if all readings are there, if we have less than 50% of the data, we shouldn't use it
     counts = all_stats.groupby("Property_ID")["mean: count per day"].agg("sum").reset_index()
     homes_to_keep = counts.loc[counts["mean: count per day"] >= 0.5 * 720 * 2, "Property_ID"]
-    homes_dropped = [file[0:7] for file in files_list if file[0:7] not in homes_to_keep.unique()]
+    homes_id_list = [id_list.replace("Property_ID=", "") for id_list in files_list]
+    homes_dropped = [file for file in homes_id_list if file not in homes_to_keep.unique()]
 
     stats_to_use = all_stats[all_stats["Property_ID"].isin(homes_to_keep)]
 
@@ -117,8 +118,8 @@ def classify_and_predict(location_out: str, files_list: str):
         feature_names=X.columns,
         class_names=["Not Hot Water", "Hot Water"],
     )
-    graph = pydotplus.graph_from_dot_data(dot_data2.getvalue())
-    Image(graph.create_png())
+    graph_classififier_A = pydotplus.graph_from_dot_data(dot_data2.getvalue())
+    Image(graph_classififier_A.create_png())
 
     X = stats_to_use.drop(columns=["sensor_type", "Property_ID"])
     Y = stats_to_use["sensor_type"] == "Hot_Water_Flow_Temperature"
@@ -160,10 +161,10 @@ def classify_and_predict(location_out: str, files_list: str):
         feature_names=X.columns,
         class_names=["Not Hot Water", "Hot Water"],
     )
-    graph = pydotplus.graph_from_dot_data(dot_data2.getvalue())
-    Image(graph.create_png())
+    graph_classififier_B = pydotplus.graph_from_dot_data(dot_data2.getvalue())
+    Image(graph_classififier_B.create_png())
 
-    return classifier_A, classifier_B, predictions_A, predictions_B, stats_to_use, all_stats, homes_dropped
+    return classifier_A, classifier_B, predictions_A, predictions_B, stats_to_use, all_stats, homes_dropped, graph_classififier_A, graph_classififier_B
 
 
 def cleaning(
@@ -201,8 +202,8 @@ def cleaning(
         DataFrame: home_summary_part contains information on the raw/cleaned home
     """
 
-    id = house_id
-    file_in_path = os.path.join(location_in, house_id)
+    file = "Property_ID=" + house_id
+    file_in_path = os.path.join(location_in, file)
     raw_data = utils.load_data(file_in_path, file_format=file_format)
 
     # Round timestamps of all the raw data and drops duplicates
@@ -211,13 +212,13 @@ def cleaning(
     # Fix to remove timestamps which are left in trimmed properties when qa.round_timestamps is run after trimming instead of before
     trim_dates_df = pd.read_csv("trim_list.csv")
 
-    if house_id in trim_dates_df:
+    if house_id in trim_dates_df["Property_ID"].values:
         trim_date_end = pd.to_datetime(
-            trim_dates_df[trim_dates_df["Property_ID"] == house_id].iloc[:, 2], format="%d/%m/%Y"
+            trim_dates_df[trim_dates_df["Property_ID"] == house_id].iloc[:, 1], format="%d/%m/%Y"
         ) + pd.Timedelta(days=1)
         formatted_data = formatted_data[~formatted_data.index.isin(trim_date_end)]
 
-    # Drop any duplicated rows (These were introduced by the gap filling)
+    # Drop any duplicated rows (these were introduced by the gap filling)
     if "Timestamp" not in formatted_data.columns:
         formatted_data = formatted_data.reset_index()
     num_rows_start = len(formatted_data)
@@ -229,7 +230,7 @@ def cleaning(
     data = qa.select_sensors(formatted_data, metric="spfh2")
 
     # Create home_summary and add Whole_ columns
-    home_summary_part = qa.create_home_summary(data, id)
+    home_summary_part = qa.create_home_summary(data, house_id)
     home_summary_part = home_summary_part.add_prefix("Whole_")
     home_summary_part.rename(columns={"Whole_Property_ID": "Property_ID"}, inplace=True)
 
@@ -245,8 +246,7 @@ def cleaning(
 
     # We want to keep all the alteration records for all homes
     if len(alteration_record) > 0:
-        alteration_record["Property_ID"] = id
-    all_homes_alteration_record = pd.concat([all_homes_alteration_record, alteration_record])
+        alteration_record["Property_ID"] = house_id
 
     # We want to save all the data out, with the cleaned cumulative data, and non-cleaned temperature data
     temp_sensors = [sensor for sensor in formatted_data["sensor_type"].unique() if sensor.endswith("Temperature")]
@@ -256,7 +256,7 @@ def cleaning(
 
     # Add Cleaned_columns to home_summary
     home_summary_part = pd.concat(
-        [home_summary_part, qa.create_home_summary(cleaned_data, id).iloc[:, 1:].add_prefix("Cleaned_")], axis=1
+        [home_summary_part, qa.create_home_summary(cleaned_data, house_id).iloc[:, 1:].add_prefix("Cleaned_")], axis=1
     )
 
     cleaned_data = cleaned_data.dropna()
@@ -295,28 +295,101 @@ def cleaning(
             output_data, house_id, output, location_out_cleaned, all_homes_alteration_record
         )
 
+    # create year-week column
+    cleaned_data["year-week"] = cleaned_data["Timestamp"].dt.year*100 + cleaned_data["Timestamp"].dt.isocalendar().week
+
+    # filter for temp data which is not internal air temperature
+    temp_data = cleaned_data[cleaned_data["sensor_type"].str.contains("Temp")]
+    temp_data = temp_data[~(temp_data["sensor_type"] == "Internal_Air_Temperature")]
+
+    # identify temp data out of range and remove it from the cleaned dataset
+    temp_data["year-week"] = temp_data["Timestamp"].dt.year*100 + temp_data["Timestamp"].dt.isocalendar().week
+    temp_data = temp_data.groupby(["year-week", "sensor_type"])["value"].std().reset_index()
+    temp_data["std_out_of_range"] = temp_data["value"] < 0.5
+    temp_data_out_of_range = temp_data[temp_data["std_out_of_range"] == True].drop("value", axis=1)
+    cleaned_data = cleaned_data.merge(temp_data_out_of_range, on=["year-week", "sensor_type"], how="left")
+    cleaned_data["std_out_of_range"] = cleaned_data["std_out_of_range"].fillna(False)
+    cleaned_data = cleaned_data[cleaned_data["std_out_of_range"] == False].drop(["std_out_of_range", "year-week"], axis=1)
+
+    # optional code to see pre-manual cleaning chart
+    # import plotly.express as px
+    # cleaned_data_temp = cleaned_data[cleaned_data["sensor_type"].str.contains("Temp")]
+    # cleaned_data_pivot = cleaned_data_temp.pivot(index="Timestamp", columns="sensor_type", values="value")
+    # cleaned_data_resampled = cleaned_data_pivot.resample("1d").mean().reset_index()
+    # fig = px.line(cleaned_data_resampled, x="Timestamp", y=["Heat_Pump_Heating_Flow_Temperature", "Hot_Water_Flow_Temperature"])
+    # fig.show()
+
+    # implement manual temp cleaning
+    # file with manual temp cleaning properties exists in git repo
+    manual_temp_cleaning = pd.read_csv("manual_hot_water_flow_temp_swaps.csv")
+    manual_temp_cleaning = manual_temp_cleaning[["Property_ID", "Temperature swap: Type", "Full swap", "cleaning process: SWAP", "starting date", "ending date"]]
+    manual_temp_cleaning["starting date"] = pd.to_datetime(manual_temp_cleaning["starting date"], dayfirst=True)
+    manual_temp_cleaning["ending date"] = pd.to_datetime(manual_temp_cleaning["ending date"], dayfirst=True)
+    manual_temp_cleaning.head()
+    if house_id in manual_temp_cleaning["Property_ID"].unique():
+        property_manual_cleaning = manual_temp_cleaning[manual_temp_cleaning["Property_ID"] == house_id]
+
+        if property_manual_cleaning["Temperature swap: Type"].values[0] == "step":
+            cleaned_data["sensor_type"] = np.where(((cleaned_data["sensor_type"] == "Heat_Pump_Heating_Flow_Temperature")
+                | (cleaned_data["sensor_type"] == "Hot_Water_Flow_Temperature"))
+                & (cleaned_data["Timestamp"] <= property_manual_cleaning["ending date"].values[0]), "Heat_Pump_Heating_Flow_Temperature", cleaned_data["sensor_type"])
+
+        elif property_manual_cleaning["Temperature swap: Type"].values[0] == "inverted":
+            if property_manual_cleaning["Full swap"].values[0] == True:
+                if property_manual_cleaning["cleaning process: SWAP"].values[0] == "HW_HPH":
+                    cleaned_data["sensor_type"] = np.where(cleaned_data["sensor_type"] == "Heat_Pump_Heating_Flow_Temperature",
+                                                            "Hot_Water_Flow_Temperature",
+                                                            np.where(cleaned_data["sensor_type"] == "Hot_Water_Flow_Temperature",
+                                                                "Heat_Pump_Heating_Flow_Temperature",
+                                                                cleaned_data["sensor_type"]))
+
+                elif property_manual_cleaning["cleaning process: SWAP"].values[0] == "DROP":
+                    cleaned_data = cleaned_data[~cleaned_data["sensor_type"].str.contains("Temp")]
+
+            if property_manual_cleaning["Full swap"].values[0] == False:
+                if property_manual_cleaning["cleaning process: SWAP"].values[0] == "HW_HPH":
+                    cleaned_data["sensor_type"] = np.where((cleaned_data["sensor_type"] == "Heat_Pump_Heating_Flow_Temperature")
+                                                            & (cleaned_data["Timestamp"] >= property_manual_cleaning["starting date"].values[0])
+                                                            & (cleaned_data["Timestamp"] <= property_manual_cleaning["ending date"].values[0]),
+                                                            "Hot_Water_Flow_Temperature",
+                                                            np.where((cleaned_data["sensor_type"] == "Hot_Water_Flow_Temperature")
+                                                                    & (cleaned_data["Timestamp"] >= property_manual_cleaning["starting date"].values[0])
+                                                                    & (cleaned_data["Timestamp"] <= property_manual_cleaning["ending date"].values[0]),
+                                                                    "Heat_Pump_Heating_Flow_Temperature",
+                                                                    cleaned_data["sensor_type"]))
+                elif property_manual_cleaning["cleaning process: SWAP"].values[0] == "ALL_HPHFT":
+                    np.where(((cleaned_data["sensor_type"] == "Heat_Pump_Heating_Flow_Temperature")
+                            | (cleaned_data["sensor_type"] == "Hot_Water_Flow_Temperature"))
+                            & (cleaned_data["Timestamp"] >= property_manual_cleaning["starting date"].values[0])
+                            & (cleaned_data["Timestamp"] <= property_manual_cleaning["ending date"].values[0]),
+                            "Heat_Pump_Heating_Flow_Temperature", cleaned_data["sensor_type"])
+
+    # # optional code to see after manual cleaning chart
+    # cleaned_data_temp = cleaned_data[cleaned_data["sensor_type"].str.contains("Temp")]
+    # cleaned_data_pivot = cleaned_data_temp.pivot(index="Timestamp", columns="sensor_type", values="value")
+    # cleaned_data_resampled = cleaned_data_pivot.resample("1d").mean().reset_index()
+    # fig = px.line(cleaned_data_resampled, x="Timestamp", y=["Heat_Pump_Heating_Flow_Temperature", "Hot_Water_Flow_Temperature"])
+    # fig.show()
+
     # Save cleaned data
-    file = house_id
     cleaned_data.to_parquet(
-        os.path.join(location_out_cleaned, "cleaned", f"{file}.parquet"), index=False,
+        os.path.join(location_out_cleaned, "cleaned", f"{file}.parquet"),
+        index=False,
     )
 
-    return home_summary_part
+    return home_summary_part, alteration_record, cleaned_data
 
 
 def double_flagged_temp_clean(
     output_data, home, output, location_out_cleaned, classifier_A, classifier_B, all_homes_alteration_record
 ):
-
-    file = home
-    id = file.split("=")[-1]
+    file = "Property_ID=" + home
+    #id = file.split("=")[-1]
     data = output_data.reset_index()
     temperature_data = utils.filter_temperature_data(data)
     temperature_data = temperature_data.loc[temperature_data["sensor_type"].isin(sensors_may_swap)]
 
-    sensors_to_swap = output.loc[
-        (output["Property_ID"] == home) & (output["flagged"]), "sensor_type"
-    ].unique()
+    sensors_to_swap = output.loc[(output["Property_ID"] == home) & (output["flagged"]), "sensor_type"].unique()
 
     mask_A = temperature_data["sensor_type"] == sensors_to_swap[0]
     mask_B = temperature_data["sensor_type"] == sensors_to_swap[1]
@@ -325,14 +398,13 @@ def double_flagged_temp_clean(
     temperature_data.loc[mask_B, "sensor_type"] = sensors_to_swap[0]
 
     # Check that these sensors characteristics are corrected by the change
-    stats = td.get_temperature_stats(temperature_data.reset_index(), id=file.split("=")[-1])
+    stats = td.get_temperature_stats(temperature_data.reset_index(), id = home)
 
     X = stats.drop(columns=["sensor_type", "Property_ID"])
     prediction = classifier_A.predict(X.drop(columns=["mean: count per day"])) & classifier_B.predict(X)
 
     # If the changed data is now classified correctly, we consider the change good and output the data
     if (prediction == (stats["sensor_type"] == "Hot_Water_Flow_Temperature")).all():
-
         # Update the alteration record with the changes made
         alteration_record = ds.add_alteration_record(
             pd.DataFrame(),
@@ -357,6 +429,7 @@ def double_flagged_temp_clean(
     else:
         output.loc[output["Property_ID"] == home, "issue"] = "failed: HWFT full swap: not fixed"
         output.loc[output["Property_ID"] == home, "outcome"] = "cleaned"
+        alteration_record = pd.DataFrame()
 
     # Re-make the full dataset with the temperature sensor data replaced with the swapped version
     data = pd.concat([data.loc[~data["sensor_type"].isin(sensors_may_swap)], temperature_data])
@@ -364,7 +437,7 @@ def double_flagged_temp_clean(
     cleaned_data, alteration_record = td.remove_temperature_anomalies(data, normal_ranges, alteration_record)
     output.loc[output["Property_ID"] == home, "anomalies cleaned"] = True
 
-    alteration_record["Property_ID"] = id
+    alteration_record["Property_ID"] = home
     all_homes_alteration_record = pd.concat([all_homes_alteration_record, alteration_record])
 
     return all_homes_alteration_record, cleaned_data
@@ -373,12 +446,12 @@ def double_flagged_temp_clean(
 def single_flagged_temp_clean(
     output_data, home, output, location_out_cleaned, classifier_A, classifier_B, all_homes_alteration_record
 ):
-
     # For homes where 1 sensor is flagged
     # Many of these appear to be a case where initially the hot water sensor is HP_flow sensors and is then swapped part way through, at which point readings for a missing HP sensor suddenly start.
     # The initial readings appear to combined HP_flow and HW_flow. So data before this point will be flagged
 
-    file = home
+    #file = home
+    file = "Property_ID=" + home
     data = output_data.reset_index()
     temperature_data = utils.filter_temperature_data(data)
 
@@ -406,7 +479,13 @@ def single_flagged_temp_clean(
         # display
         rpt.display(signal, [len(signal)], result)
         plt.savefig(
-            os.path.join(location_out_cleaned, "plots", "single_flagged", "change_point_analysis", file + ".png",)
+            os.path.join(
+                location_out_cleaned,
+                "plots",
+                "single_flagged",
+                "change_point_analysis",
+                file + ".png",
+            )
         )
 
         # Result always ends in the number of points in the signal so if it finds 1 change point, result will have length 2
@@ -414,7 +493,8 @@ def single_flagged_temp_clean(
             # Result gives number of days at which the signal switches character, at this point we want to
             # retest before and after to see if there is a good split between hot water and not hot water
             start_date = temperature_data.loc[
-                temperature_data["sensor_type"] == "Hot_Water_Flow_Temperature", "Timestamp",
+                temperature_data["sensor_type"] == "Hot_Water_Flow_Temperature",
+                "Timestamp",
             ].dt.date.min()
             change_date = pd.to_datetime(start_date + pd.Timedelta(days=result[0]))
             mask = (temperature_data["Timestamp"] < change_date) & (
@@ -437,13 +517,12 @@ def single_flagged_temp_clean(
                 temperature_data.loc[mask, "sensor_type"] = "Heat_Pump_Heating_Flow_Temperature"
 
                 # Check that these sensors characteristics are corrected by the change
-                stats = td.get_temperature_stats(temperature_data.copy(), id=file.split("=")[-1])
+                stats = td.get_temperature_stats(temperature_data.copy(), id = home)
                 X = stats.drop(columns=["sensor_type", "Property_ID"])
                 prediction = classifier_A.predict(X.drop(columns=["mean: count per day"])) & classifier_B.predict(X)
 
                 # If the changed data is now classified correctly, we consider the change good and output the data
                 if (prediction == (stats["sensor_type"] == "Hot_Water_Flow_Temperature")).all():
-
                     # Update the alteration record with the changes made
                     alteration_record = ds.add_alteration_record(
                         pd.DataFrame(),
@@ -487,7 +566,12 @@ def single_flagged_temp_clean(
     # Even if we fail to correct the sensor we flagged as unusual we still want to remove anomalies and save all the data out
 
     # Re-make the full dataset with the temperature sensor data replaced with the swapped version
-    data = pd.concat([data.loc[data["sensor_type"].isin(non_temp_sensors)], temperature_data,])
+    data = pd.concat(
+        [
+            data.loc[data["sensor_type"].isin(non_temp_sensors)],
+            temperature_data,
+        ]
+    )
 
     cleaned_data, alteration_record = td.remove_temperature_anomalies(data, normal_ranges, alteration_record)
     output.loc[output["Property_ID"] == home, "anomalies cleaned"] = True

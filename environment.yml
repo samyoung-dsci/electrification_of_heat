@@ -18,6 +18,7 @@ dependencies:
   - numpy
   - matplotlib
   - tqdm
+  - openpyxl
   - tk
   - zeromq
   - traitlets

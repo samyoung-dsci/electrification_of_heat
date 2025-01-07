@@ -72,18 +72,19 @@ def select_sensors(data: pd.DataFrame, metric: str) -> pd.DataFrame:
     return spfh_sensors
 
 
-def round_timestamps(data: pd.DataFrame, n_mins: int = 2) -> pd.DataFrame:
+def round_timestamps(data: pd.DataFrame, n_mins: int = 2, keep_original_timestamp=False) -> pd.DataFrame:
     """Rounds timestamp with algorithm
 
     Args:
         spfh_sensors (pd.DataFrame): dataframe with data on sensors where index is the timestamp in datetime format
         n_mins (int, optional): Number of minutes to round to. Defaults to 2.
+        keep_original_timestamp: should the original timestamp wish to be kept, set to True. Defaults to False.
 
     Returns:
         pd.DataFrame: dataframe with rounded timestamps
     """
 
-    data["Timestamp_rounded"] = data.index.round(f"{n_mins}T")
+    data["Timestamp_rounded"] = data.index.round(f"{n_mins}min")
 
     # Code to correct timestamps
     # In case there happen to be duplicated timestamps we reset the index first
@@ -114,10 +115,14 @@ def round_timestamps(data: pd.DataFrame, n_mins: int = 2) -> pd.DataFrame:
             "Timestamp_rounded_diff_next",
             "Timestamp_rounded_diff_prev",
             "correction_flag",
-            "Timestamp",
         ],
         axis=1,
     )
+
+    if keep_original_timestamp == False:
+        data = data.drop("Timestamp", axis=1)
+    else:
+        data = data.rename({"Timestamp": "Timestamp_original"}, axis=1)
 
     return data
 
@@ -166,7 +171,7 @@ def select_window(
         max_score = np.nan
         mean_score = np.nan
     elif method == "best":
-        (best_window, home_summary_part, windows, alteration_record, cleaned_data,) = ds.find_best_window(
+        (best_window, home_summary_part, windows, alteration_record, cleaned_data) = ds.find_best_window(
             data_drop_nan,
             gap_len_defs,
             home_summary_part,
@@ -205,17 +210,17 @@ def select_window(
         # If no window is found don't want to calculates the following
         if home_summary_part["window_duration_days"].values[0] > (pd.Timedelta(minutes=2) / pd.Timedelta(days=1)):
             expected_data_points = math.floor(
-                home_summary_part["window_duration_days"] * pd.Timedelta(days=1) / datetime.timedelta(minutes=2)
+                (home_summary_part["window_duration_days"] * pd.Timedelta(days=1) / datetime.timedelta(minutes=2)).values[0]
             )
             for sensor in window_data["sensor_type"].unique():
                 home_summary_part[f"window_%_complete_{sensor}"] = (
                     window_data.loc[window_data["sensor_type"] == sensor].dropna().count().value / expected_data_points
                 )
 
-            # We want to give the window a bad gap score if it has < 50% of its HP data
+            # We want to give the window a bad gap score if it has < 70% of its HP data
             HP_data_mask = (
-                (home_summary_part["window_%_complete_Whole_System_Energy_Consumed"] < 0.5)
-                | (home_summary_part["window_%_complete_Heat_Pump_Energy_Output"] < 0.5)
+                (home_summary_part["window_%_complete_Whole_System_Energy_Consumed"] < 0.7)
+                | (home_summary_part["window_%_complete_Heat_Pump_Energy_Output"] < 0.7)
             ) & (home_summary_part["window_max_gap_score"] < 4)
             home_summary_part.loc[HP_data_mask, "window_max_gap_score"] = 4
             # Also need to update the max score which depends on the max gap score
@@ -341,7 +346,6 @@ def create_daily_plots(data: pd.DataFrame, metric: str, house_id: str, home_summ
     """
     if metric in home_summary_part.columns:
         spfh_sensors_daily = add_time_columns(data)
-        # spfh_sensors_daily["date"] = pd.to_datetime(spfh_sensors_daily["date"])
         spfh_sensors_daily = spfh_sensors_daily.groupby("date").max()
         spfh_sensors_daily = spfh_sensors_daily.drop(["hour", "half_hour"], axis=1)
         spfh_sensors_daily = spfh_sensors_daily.dropna()
@@ -389,7 +393,7 @@ def create_home_summary(data: pd.DataFrame, id: str) -> pd.DataFrame:
     ) / pd.Timedelta(days=1)
     if not home_summary_part["duration_days"].isna().values[0]:
         expected_data_points = math.floor(
-            home_summary_part["duration_days"] * pd.Timedelta(days=1) / pd.Timedelta(minutes=2)
+            (home_summary_part["duration_days"] * pd.Timedelta(days=1) / pd.Timedelta(minutes=2)).values[0]
         )
 
         sensor_timestamp_count = (
@@ -461,146 +465,3 @@ def select_sensors(data: pd.DataFrame, metric: str) -> pd.DataFrame:
     spfh_sensors = data.loc[data["sensor_type"].isin(spfh_required_cols[metric])].copy()
 
     return spfh_sensors
-
-
-def Property_ID_home_id_lookup() -> pd.DataFrame:
-    """Returns a full lookup of Property_ID and home_id directly from usmart
-
-    Returns:
-        pd.DataFrame: a lookup of Property_ID and home_id
-    """
-
-    pre_ = "https://api.usmart.io/org"
-    headers = {
-        "cache-control": "no-cache",
-        "api-key-id": os.environ["MEP_KEY_ID"],
-        "api-key-secret": os.environ["MEP_KEY_SECRET"],
-    }
-
-    urls = {
-        "ovo": [
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/6aaee576-c76f-4974-90c2-0f379782df7d",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/b808ba0e-2d9a-4da6-8bc0-6630ca6e1eab",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/f4e01536-eded-473e-9022-69d889d8b18d",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/836a931a-bb2c-4b87-96a1-553fffd7de62",
-        ],
-        "eon": [
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/4e44ea07-a65b-4382-b888-45651fc09901",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/84809e09-33dc-48b5-a4c3-90cc7efe00be",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/bbffa51b-9867-4cad-9056-9b589123ca37",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/7709a77c-c7d5-4121-8e46-541e2600e59f",
-        ],
-        "ww": [
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/3309c112-07bc-4fe8-986c-4e52861eb1b8",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/59d17bb5-e289-442f-b778-f26dc786ffcb",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/5f12eaf2-b998-420b-9555-31e26b783314",
-            "92610836-6c2b-4a26-a0a0-b903bde0dc46/4dd7a850-858c-4e65-a456-772f76e93ec1",
-        ],
-    }
-
-    try:
-        # Takes ~30 secs
-        installers = ["ovo", "eon", "ww"]
-        dfs = []
-        for installer in installers:
-            # print(installer)
-            for url_in in urls[installer]:
-                # print(url_in)
-                url = (
-                    "https://api.usmart.io/org/"
-                    + url_in
-                    + "/latest/urql?"
-                    + "&aggregate(Property_ID,Home_ID,value_count(Timestamp))"
-                )
-                response = requests.request("GET", url, headers=headers)
-                file = json.loads(response.content)[0]
-                df = pd.DataFrame(file).T
-
-                if len(df) == 0:
-                    continue
-                dfs.append(df)
-
-                df = pd.concat(dfs)
-                df = df.reset_index()
-                df = pd.melt(df, id_vars="index")
-                df = df.dropna()
-                df = df.drop("value", axis=1)
-                # df.to_csv("missing_data_summary.csv", index=False)
-            # If we hit an error it's usually due to a problem with the data coming back, so print that out
-        df.T
-    except requests.exceptions.HTTPError as errh:
-        print("Http Error:", errh)
-    except requests.exceptions.ConnectionError as errc:
-        print("Error Connecting:", errc)
-    except requests.exceptions.Timeout as errt:
-        print("Timeout Error:", errt)
-    except requests.exceptions.RequestException as err:
-        print("OOps: Something Else", err)
-
-    df = df.groupby(["index", "variable"]).count().reset_index()
-    df = df.rename({"index": "Property_ID", "variable": "Home_ID"}, axis=1)
-    # df.to_csv("Property_ID-Home_ID Lookup.csv", index=False)
-
-    return df
-
-
-def get_installation_database() -> pd.DataFrame:
-    """Get the installation database records from USMART
-
-    Returns:
-        pd.DataFrame: Installation database
-    """
-    urls = [
-        "https://api.usmart.io/org/92610836-6c2b-4a26-a0a0-b903bde0dc46/36f81d29-023d-493c-b762-c21096e1a2c7/latest/urql",
-        "https://api.usmart.io/org/92610836-6c2b-4a26-a0a0-b903bde0dc46/6aa8fedc-406b-4eb2-a7b3-fcd77170e867/latest/urql",
-        "https://api.usmart.io/org/92610836-6c2b-4a26-a0a0-b903bde0dc46/6cdd1c79-167f-48fa-bae4-2c8ab659886a/latest/urql",
-    ]
-    headers = {
-        "cache-control": "no-cache",
-        "api-key-id": os.environ["MEP_KEY_ID"],
-        "api-key-secret": os.environ["MEP_KEY_SECRET"],
-    }
-
-    installation_database = []
-    for url in urls:
-        response = requests.request("GET", url, headers=headers)
-        file = pd.DataFrame(json.loads(response.text))
-        installation_database.append(file)
-
-    installation_database = pd.concat(installation_database)
-    installation_database = installation_database[
-        [
-            "House_ID",
-            "HP_Installed",
-            "HP_Size_kW",
-            "HP_Brand",
-            "HP_Model",
-            "Name_Install",
-        ]
-    ]
-    anonymised_ids = pd.read_excel(
-        "S:\Projects\Electrification of Heat\WP3 - Data Collection & Co-ordination\Property Number Anonymisation.xlsx"
-    )
-    installation_database = installation_database.merge(anonymised_ids, how="inner", on="House_ID")
-    hp_simplify_dict = {
-        "ASHP": "ASHP",
-        "Hybrid_Split_New": "Hybrid",
-        "HT_ASHP": "HT_ASHP",
-        "GSHP_Borehole": "GSHP",
-        "Hybrid_Monobloc": "Hybrid",
-        "GSHP": "GSHP",
-        "Hybrid": "Hybrid",
-        "Hybrid_split_new": "Hybrid",
-        "Hybrid_Split_Existing": "Hybrid",
-    }
-    installation_database["HP_Type"] = installation_database["HP_Installed"].map(hp_simplify_dict)
-    installation_database["DC"] = np.where(
-        installation_database["House_ID"].astype(str).str.len() == 7,
-        "OVO",
-        np.where(
-            installation_database["House_ID"].astype(str).str.len() == 6,
-            "E.ON",
-            "Warmworks",
-        ),
-    )
-    return installation_database
