@@ -8,7 +8,8 @@ Data cleansing is the process of taking a “raw” dataset and making slight ad
 - Anomalous cumulative data removal – from start of monitoring. 
 - Relevelling data following a meter reset. 
 - Incorrect column assignment for non-cumulative (temperature) data
-- Removal of out-of-range temperatures. 
+- Removal of out-of-range temperatures.
+- Removal of long periods of constant temperature.
 - Supplementary data cleansing – amending spelling or grammar variations. 
 - Supplementary data cleansing – aligning property age ranges.
 
@@ -134,17 +135,69 @@ A graph of the change point detection is shown in Figure 6.10 whereby the vertic
  
 *Figure 6.10: A graph of the change point detection used to identify when physical changes to the monitoring system were made.*
 
+The above process rectified most of the HWF and HPHF temperature swaps however, upon further analysis, additional erroneously logged data remained. This data was dealt with by performing a check of the cleansed 30-minute data to evaluate daily time spent in hot water (total number of hours per day) and daily time spent in heating mode throughout the year. The total daily energy consumed and energy output in each mode and the average temperature of the HWF and HPHF per day were also derived and inspected. The analysis of these non-cumulative metrics helped flagging a list of properties for which their hot water and heat pump heating temperature values were potentially erroneous.
+
+A total of 29 properties with issues on how the flow temperature was tracked were identified. Following the automated reassignments, the raw and cleansed datasets were manually reviewed to recommend a flow temperature re-assignment. For properties EOH0737 and EOH0889, the flow temperatures warranted manual inspection however, upon inspection a good approach to cleanse the data couldn’t be determined so, the decision was made to leave the flow temperature as it was and avoid adding any 'features' to the data that could be misleading.
+
+Following the manual checks, four types of temperature data cleansing were identified (note that some of these are closely aligned to those which have been defined earlier in this subsection, but are done at this stage as they were not captured via the automated process):
+
+1. Swapping of the HPH and HW flow temperature values. Two cases were distinguished:
+
+    a. Full data swap: HPHF temperature was erroneously labelled as HWF since the start of the data collection and vice versa. This affected eight properties (see Table 6.1).
+
+    b. Partial data swap: mislabelling only occurring once for a specific period. Therefore, swapping only had to be implemented over those timestamps. This  type of swapping was only found in one property.
+
+    c. Allocating all observations to the HPHF temperature column: This was always affecting the data for a specific period (instead of for the whole dataset). Generally, over that time only one flow temperature data (in this case HWF) was tracked. At the end of that flagged period, both HPHF and HWF temperatures were measured. This affected 19 properties, but for 15 of those the periods were outside of the window selected, normally when data started to be collected.
+
+    d. Dropping both HPHF and HWF temperature data: This was motivated by data quality concerns after the 2 min data was inspected. The complete removal of the flow temperature column was implemented for only for one property (EOH0590), which was already removed from the analysis because of other data quality issues.
+
+Below the list of properties that undertook any of the described manual column reassignments.
+
+*Table 6.1: Accepted temperature ranges for each data column.*
+
+| Property_ID | Column reassignment                                   | Date Range               |
+|-------------|-------------------------------------------------------|--------------------------|
+| EOH0121     | HWF and HPHF swap                                     | Full data swap           |
+| EOH0457     | HWF and HPHF swap                                     | Full data swap           |
+| EOH0459     | HWF and HPHF swap                                     | Full data swap           |
+| EOH0603     | HWF and HPHF swap                                     | Full data swap           |
+| EOH2430     | HWF and HPHF swap                                     | Full data swap           |
+| EOH2722     | HWF and HPHF swap                                     | Full data swap           |
+| EOH3138     | HWF and HPHF swap                                     | Full data swap           |
+| EOH3186     | Partial HWF and HPHF swap                             | 15/06/2021 to 17/11/2021 |
+| EOH1669     | HWF and HPHF swap back (following swap during automated cleansing) | Full data swap |
+| EOH0067     | Allocating HWF data to HPHF                           | 26/01/2021 to 03/06/2021 |
+| EOH0082     | Allocating HWF data to HPHF                           | 04/03/2021 to 03/06/2021 |
+| EOH0279     | Allocating HWF data to HPHF                           | 26/10/2020 to 03/06/2021 |
+| EOH0346     | Allocating HWF data to HPHF                           | 21/04/2021 to 25/05/2021 |
+| EOH0516     | Allocating HWF data to HPHF                           | 16/02/2021 to 03/06/2021 |
+| EOH0526     | Allocating HWF data to HPHF                           | 01/10/2021 to 05/10/2021 |
+| EOH0546     | Allocating HWF data to HPHF                           | 01/11/2020 to 25/05/2021 |
+| EOH0690     | Allocating HWF data to HPHF                           | 19/02/2021 to 26/02/2021 |
+| EOH1400     | Allocating HWF data to HPHF                           | 09/02/2021 to 25/02/2021 |
+| EOH1406     | Allocating HWF data to HPHF                           | 02/03/2021 to 12/07/2021 |
+| EOH1588     | Allocating HWF data to HPHF                           | 18/03/2021 to 13/04/2021 |
+| EOH1629     | Allocating HWF data to HPHF                           | 29/07/2021 to 22/10/2021 |
+| EOH1826     | Allocating HWF data to HPHF                           | 02/03/2021 to 22/03/2021 |
+| EOH1852     | Allocating HWF data to HPHF                           | 14/05/2021 to 03/06/2021 |
+| EOH2061     | Allocating HWF data to HPHF                           | 12/05/2022 to 18/06/2022 |
+| EOH2101     | Allocating HWF data to HPHF                           | 01/11/2020 to 02/06/2021 |
+| EOH2406     | Allocating HWF data to HPHF                           | 06/03/2021 to 01/04/2021 |
+| EOH2799     | Allocating HWF data to HPHF                           | 17/11/2020 to 01/06/2021 |
+| EOH3107     | Allocating HWF data to HPHF                           | 14/01/2021 to 02/06/2021 |
+| EOH0590     | HWF and HPHF drop                                      | Full data                |
+
 ## Removal of Out-of-Range Temperatures
 
 The range of expected temperatures recorded by each sensor within the heat pump monitoring system is relatively predictable and therefore it is possible to spot anomalous values. To search for anomalous values, it is necessary to set acceptable ranges. Within the cleansing process, these temperature ranges were wide, to maximise the temperature data which can be used and avoid removing any correct values. The acceptable temperature ranges are presented in Table 6.1.
 
 There are a small number of anomalous temperature values which are vastly different to the usual expected ranges. These anomalous values are removed from the cleansed dataset and therefore not included within the analysis. 
 
-*Table 6.1: Accepted temperature ranges for each data column.*
+*Table 6.2: Accepted temperature ranges for each data column.*
 
 | Data Column                        | Min Value ( ⷪC ) | Max Value ( ⷪC ) | Notes                                                                                                                                                                                           |
 | ---------------------------------- | --------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Internal_Air_Temperature           | 0               | 40              | Based on Temperature Variations in UK Heated Homes Study [20] with a 5 ⷪC variation on either side.                                                                                              |
+| Internal_Air_Temperature           | 2               | 40              | Based on Temperature Variations in UK Heated Homes Study [20] with a 5 ⷪC variation on either side.                                                                                              |
 | External_Air_Temperature           | -27.2           | 40.3            | Based on record UK temperatures [21].                                                                                                                                                           |
 | Hot_Water_Flow_Temperature         | 5               | 80              | Min value based on freezing temperature of water. Maximum value based on the highest temperature possible by the units installed as part of this study [22]. Both have an extra +5 ⷪC variation. |
 | Heat_Pump_Return_Temperature       | 5               | 80              | See Hot_Water_Flow_Temperature                                                                                                                                                                  |

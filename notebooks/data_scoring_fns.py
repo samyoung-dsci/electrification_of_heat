@@ -7,10 +7,14 @@ import plotly.io as pio
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import os
+import statistics
 
 
 def add_alteration_record(
-    alteration_record: pd.DataFrame, changed_data: pd.DataFrame, alteration: str, reason: str,
+    alteration_record: pd.DataFrame,
+    changed_data: pd.DataFrame,
+    alteration: str,
+    reason: str,
 ) -> pd.DataFrame:
     """Add a record of an alteration to the alteration record
 
@@ -96,7 +100,10 @@ def fill_gaps_with_nans(data: pd.DataFrame) -> pd.DataFrame:
     for sensor in sensor_types:
         filt = data["sensor_type"] == sensor
         df = data[filt].apply(
-            lambda x: x.reindex(pd.date_range(x.index.min(), x.index.max(), freq="2T"), fill_value=np.NAN,)
+            lambda x: x.reindex(
+                pd.date_range(x.index.min(), x.index.max(), freq="2min"),
+                fill_value=np.NAN,
+            )
         )
         df.index.set_names("Timestamp", inplace=True)
         df["sensor_type"] = df["sensor_type"].ffill()
@@ -323,7 +330,7 @@ def score_gap(gap: pd.DataFrame, gap_len_defs: dict, spf_ranges: dict) -> float:
                 if duration >= gap_len_defs["long"]:
                     return 5.0
                 elif duration >= gap_len_defs["medium"]:
-                    return 3.6
+                    return 4
                 elif duration >= gap_len_defs["short"]:
                     return 2.0
         # If the meter did not increase across the gap we want to check if other meters did and score accordingly
@@ -376,7 +383,10 @@ def score_gap(gap: pd.DataFrame, gap_len_defs: dict, spf_ranges: dict) -> float:
 
 
 def score_all_gaps(
-    data: pd.DataFrame, gap_len_defs: dict, spf_ranges: dict, alteration_record: pd.DataFrame,
+    data: pd.DataFrame,
+    gap_len_defs: dict,
+    spf_ranges: dict,
+    alteration_record: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Identify and score all the gaps in the given data
 
@@ -395,7 +405,10 @@ def score_all_gaps(
     full_data = fill_gaps_with_nans(data)
 
     # Offset needed to ensure gaps are indexed correctly
-    time_offset = full_data.index[1] - full_data.index[0]
+    if len(full_data) > 1:
+        time_offset = full_data.index[1] - full_data.index[0]
+    elif len(full_data) == 0:
+        time_offset = full_data.index[0] - full_data.index[0]
 
     # Create a wide dataframe to store the gap scores in, as that is significantly
     # faster - particularly if there are lots of gaps.
@@ -479,7 +492,7 @@ def score_all_data(data: pd.DataFrame, spf_ranges: dict, freq: str = "M", durati
     flat_mask = data["Period"].isin(usage_data.loc[(usage_data.drop(columns=["spfh2"]) < 1).all(axis=1)].index)
 
     # Score the data
-    data["data_score"] = 0
+    data["data_score"] = 0.0
     data.loc[flat_mask, "data_score"] = 3.2
     data.loc[spf_mask, "data_score"] = 3.3
 
@@ -673,7 +686,8 @@ def find_windows(data: pd.DataFrame, window_len_mths: int = 12) -> pd.DataFrame:
 
     # We want windows where data is present at start time and corresponding end time
     start_times = pd.Series(
-        [start for start in start_times if start + duration in end_times.values], dtype="datetime64[ns]",
+        [start for start in start_times if start + duration in end_times.values],
+        dtype="datetime64[ns]",
     )
 
     # If there are any valid time windows then we calculate the score etc.
@@ -693,7 +707,8 @@ def find_windows(data: pd.DataFrame, window_len_mths: int = 12) -> pd.DataFrame:
         score_data_group_count = score_data_group.count()
 
         windows[[f"max_{score}" for score in score_list]] = windows.apply(
-            lambda x: score_data_group_max.loc[x["start"] : x["end"]].max(), axis=1,
+            lambda x: score_data_group_max.loc[x["start"] : x["end"]].max(),
+            axis=1,
         )
         windows[[f"mean_{score}" for score in score_list]] = windows.apply(
             lambda x: score_data_group_sum.loc[x["start"] : x["end"]].sum()
@@ -703,7 +718,8 @@ def find_windows(data: pd.DataFrame, window_len_mths: int = 12) -> pd.DataFrame:
         windows["end"] = windows["end"]
         sensor_list = df.columns
         windows[[f"{sensor}" for sensor in sensor_list]] = windows.apply(
-            lambda x: df.loc[x["end"]] - df.loc[x["start"]], axis=1,
+            lambda x: df.loc[x["end"]] - df.loc[x["start"]],
+            axis=1,
         )
 
         windows["mean_score"] = round(windows["mean_score"], 10)
@@ -749,11 +765,6 @@ def find_best_window(
     # Some functions following will change some of the data, we will make a record of these changes
     alteration_record = pd.DataFrame()
 
-    # These 6 functions have been commented out as they are now in the cleaning algorithm and not in window selection. To be deleted if everything works.
-    # data, alteration_record = correct_reversed_meter(data, alteration_record)
-
-    # data, alteration_record = remove_anomalous_points(data, alteration_record)
-
     # Score the data based on if monthly spfh2 is within acceptable range or if all data is flat
 
     temp_sensors = [sensor for sensor in data["sensor_type"].unique() if sensor.endswith("Temperature")]
@@ -767,14 +778,6 @@ def find_best_window(
 
     if ("gap_score" in data.columns) and ("data_score" in data.columns):
         data["score"] = data[["gap_score", "data_score"]].max(axis=1)
-
-    # # Some periods have output heat much lower than reasonable, but this is fixed after some time.
-    # # We expect this is caused by the heat meter not working, we want to remove this data
-    # data, alteration_record = remove_start_with_spf_out_of_range(data, spf_ranges, alteration_record)
-
-    # # If a meter breaks and is replaced we see a gap in the data where the value drops
-    # # We handle this here
-    # data, alteration_record = level_resets(data, alteration_record)
 
     # Find windows where there is data at both the start and the end
     windows = find_windows(data, window_len_mths)
@@ -792,8 +795,12 @@ def find_best_window(
         best_windows = windows.loc[windows["max_score"] == windows["max_score"].min()]
         # From these, find the windows with the lowest (minimum) mean gap score
         best_windows = best_windows.loc[best_windows["mean_score"] == best_windows["mean_score"].min()]
-        # From these, take the most recent one (in case there are several with the same score)
-        final_window = best_windows.loc[best_windows["end"] == best_windows["end"].max()]
+
+        best_windows["spfh2"] = qa.spf(best_windows, metric="spfh2")
+        # Take the window which holds the median spfh2, we use median_high to take the latest window of the median falls between 2 windows
+        final_window = best_windows.loc[best_windows["spfh2"] == statistics.median_high(best_windows["spfh2"])]
+        # We take the last row in case there are multiple windows with the same median
+        final_window = final_window.tail(1)
         end_timestamp = pd.Timestamp(final_window["end"].values[0])
 
         import warnings
@@ -817,7 +824,10 @@ def find_best_window(
         # Plot the full data range
         if plot_full_save_path != "":
             plot_data(
-                data, window_len_mths=window_len_mths, end_timestamp=end_timestamp, path=plot_full_save_path,
+                data,
+                window_len_mths=window_len_mths,
+                end_timestamp=end_timestamp,
+                path=plot_full_save_path,
             )
 
         # Plot the window data only
@@ -838,7 +848,10 @@ def find_best_window(
 
             # Generate the plot
             plot_data(
-                window_data, window_len_mths=None, end_timestamp=None, path=plot_window_save_path,
+                window_data,
+                window_len_mths=None,
+                end_timestamp=None,
+                path=plot_window_save_path,
             )
     else:
         final_window = pd.DataFrame()
@@ -858,7 +871,10 @@ def find_best_window(
 
 
 def plot_data(
-    data: pd.DataFrame, window_len_mths: int = None, end_timestamp: pd.Timestamp = None, path: str = "",
+    data: pd.DataFrame,
+    window_len_mths: int = None,
+    end_timestamp: pd.Timestamp = None,
+    path: str = "",
 ) -> go.Figure:
     """Plots the full range of the data with a rectangle overlay showing the chosen window. A subplot below the
     data plot displays the gap score as a color plot.

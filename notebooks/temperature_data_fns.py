@@ -11,7 +11,7 @@ import os
 import data_scoring_fns as ds
 
 
-def plot_data(data: pd.DataFrame, path: str = "", freq: str = "30T", agg_fn: str = "mean"):
+def plot_data(data: pd.DataFrame, path: str = "", freq: str = "30min", agg_fn: str = "mean"):
     """Plot the data at the given frequency
 
     Args:
@@ -162,16 +162,11 @@ def remove_temperature_anomalies(
 
 
 def calculate_heating_temp_averages(data: pd.DataFrame, file_path: str = "", plot_path: str = "") -> pd.DataFrame:
-
     heating_temp_sensors = ["Heat_Pump_Heating_Flow_Temperature", "Heat_Pump_Return_Temperature"]
     # Keep only the relevant data, within the time window
-    data = qa.round_timestamps(data, n_mins=2)
-    data = data.pivot(columns="sensor_type", values="value")
+    data = data.pivot_table(columns="sensor_type", values="value", index=data.index)
     data = data.reset_index()
-    # We only want to temperatures measured while the heat pump was on
-    if "Heat_Pump_Energy_Output" in data.columns:
-        heat_pump_on_mask = data["Heat_Pump_Energy_Output"].diff() > 0
-        data = data.loc[heat_pump_on_mask]
+
     # We only want temperatures when output was used for heating, not hot water
     if "Hot_Water_Flow_Temperature" in data.columns:
         heating_on_mask = data["Hot_Water_Flow_Temperature"].isna()
@@ -179,14 +174,48 @@ def calculate_heating_temp_averages(data: pd.DataFrame, file_path: str = "", plo
 
     # If the heating temperature sensors are present then we should continue, otherwise we can't find their averages
     if (heating_temp_sensors[0] in data.columns) & (heating_temp_sensors[1] in data.columns):
-        data = data[["Timestamp"] + heating_temp_sensors]
+        data = data[["Timestamp"] + heating_temp_sensors + ["Heat_Pump_Energy_Output"]]
     else:
         return pd.DataFrame(
             {heating_temp_sensors[0]: [np.nan, np.nan, np.nan], heating_temp_sensors[1]: [np.nan, np.nan, np.nan]},
             index=["mean", "median", "mode"],
         )
 
-    averages = data[heating_temp_sensors].agg(["mean", "median"])
+    # Label data, heating on
+    data["Heating_On"] = data["Heat_Pump_Energy_Output"].diff() > 0
+
+    # We want to find the times when the heating turns on
+    data["Heating_On_Previous"] = data["Heating_On"].shift(1)
+    data["Heating_On_Next"] = data["Heating_On"].shift(-1)
+    data = data.dropna(subset=["Heating_On_Previous", "Heating_On_Next"])
+
+    # If we have gone from heating off, to heating on (and it stayed on for at least 2 data points), then we say the heating switched on
+    data["Heating_Switched_On"] = (~data["Heating_On_Previous"]) & data["Heating_On"] & data["Heating_On_Next"]
+
+    # If we have gone from heating on, to heating off (and it stayed off for at least 2 data points), then we say the heating switched off
+    data["Heating_Switched_Off"] = data["Heating_On_Previous"] & (~data["Heating_On"]) & (~data["Heating_On_Next"])
+
+    # Now we want to label data for if the heating is on and warmed up
+    # We will assume it takes warm_up_time to warm up
+    warm_up_time = pd.Timedelta(minutes=10)
+    data["Heating_Warmed_Up"] = data["Heating_On"]
+    for on_time in data.loc[data["Heating_Switched_On"], "Timestamp"].values:
+        # Label anything within the first warm_up_time as not warmed up
+        data.loc[
+            (data["Timestamp"] >= on_time) & (data["Timestamp"] < on_time + warm_up_time), "Heating_Warmed_Up"
+        ] = False
+    # Also, if the heating is on to start with, we don't know if it is warmed up, so we will mark everything before the first Heating_Warmed_Up = False with Heating_Warmed_Up = False
+    data.loc[(~data["Heating_Warmed_Up"]).cumsum() == 0, "Heating_Warmed_Up"] = False
+
+    averages = data.loc[data["Heating_Warmed_Up"]][heating_temp_sensors].agg(["mean", "median", "max"])
+    winter_averages = (
+        data[data["Timestamp"].dt.month.isin([11, 12, 1])]
+        .loc[data["Heating_Warmed_Up"]][heating_temp_sensors]
+        .agg(["mean", "median", "max"])
+    )
+    winter_averages.columns = "winter_" + winter_averages.columns
+
+    averages = pd.concat([averages, winter_averages], axis=1)
 
     # Bin the temperatures within a reasonable range for the heating flow temperature
     start = 20
@@ -196,7 +225,7 @@ def calculate_heating_temp_averages(data: pd.DataFrame, file_path: str = "", plo
     labels = np.arange(start, end, step)
     data = data.melt(id_vars="Timestamp")
     data["bin"] = pd.cut(x=data["value"], bins=bins, labels=labels)
-    binned_data = data.groupby(["sensor_type", "bin"])["value"].count()
+    binned_data = data.groupby(["sensor_type", "bin"], observed=False)["value"].count()
     if file_path != "":
         binned_data.to_csv(file_path)
     max_counts = binned_data.reset_index(0).groupby("sensor_type").max()
@@ -294,7 +323,6 @@ def calculate_high_temperature_stats(data: pd.DataFrame) -> pd.DataFrame:
 def add_flow_temp_stats_for_window(
     data: pd.DataFrame, home_summary: pd.DataFrame, id: str, file_path: str = "", plot_path: str = ""
 ) -> pd.DataFrame:
-
     # Get the start and end times for the window
     id_mask = home_summary["Property_ID"].astype(str) == str(id)
     start = pd.to_datetime(home_summary.loc[id_mask, "window_start"].values[0])

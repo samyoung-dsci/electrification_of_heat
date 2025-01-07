@@ -17,10 +17,18 @@ def load_data(path: str, file_format: str) -> pd.DataFrame:
         data = data.rename({"Timestamp": "timestamp"}, axis=1).set_index("timestamp")
         data["sensor_type"] = data["sensor_type"].str.lower()
     elif file_format == "parquet":
-        data = pd.read_parquet(path)
+        data = pd.read_parquet(f"{path}.parquet")
 
-    # Rename heat pump energy consumed to whole system energy consumed in case it is incorrectly labelled in the raw data
-    data["sensor_type"] = data["sensor_type"].replace({"Heat_Pump_Energy_Consumed": "Whole_System_Energy_Consumed"})
+    try:
+        # Rename heat pump energy consumed to whole system energy consumed in case it is incorrectly labelled in the raw data
+        data["sensor_type"] = data["sensor_type"].replace(
+            {"Heat_Pump_Energy_Consumed": "Whole_System_Energy_Consumed"}
+        )
+        data["sensor_type"] = data["sensor_type"].replace(
+            {"heat_pump_energy_consumed": "whole_system_energy_consumed"}
+        )
+    except:
+        print("Could not rename to Whole_System_Energy_Consumed, column may already exist")
 
     if "Timestamp" in data.columns:
         data = data.set_index("Timestamp")
@@ -60,6 +68,7 @@ def load_data(path: str, file_format: str) -> pd.DataFrame:
     data.index = pd.to_datetime(data.index)
 
     data = data.reset_index().sort_values(["sensor_type", "Timestamp"]).set_index("Timestamp")
+    data = data.reset_index().dropna().set_index("Timestamp")
 
     return data
 
@@ -77,6 +86,7 @@ def load_temperature_data(path: str, file_format: str) -> pd.DataFrame:
     data = load_data(path, file_format=file_format)
 
     temperature_data = filter_temperature_data(data)
+    temperature_data = temperature_data.reset_index().dropna().set_index("Timestamp")
 
     return temperature_data
 
@@ -149,6 +159,7 @@ def resample_data(data: pd.DataFrame, freq: str = "2T") -> pd.DataFrame:
 
     return data
 
+
 def create_folder_structure(eoh_folder):
     """Creates the folder structure required to run the code
 
@@ -173,7 +184,9 @@ def create_folder_structure(eoh_folder):
     location_out_cleaned_plots = os.path.join(location_out_cleaned, "plots")
     location_out_single_flagged_plots = os.path.join(location_out_cleaned_plots, "single_flagged")
     location_out_single_flagged_plots_corrected = os.path.join(location_out_single_flagged_plots, "corrected")
-    location_out_single_flagged_plots_change_analysis = os.path.join(location_out_single_flagged_plots, "change_point_analysis")
+    location_out_single_flagged_plots_change_analysis = os.path.join(
+        location_out_single_flagged_plots, "change_point_analysis"
+    )
     location_out_double_flagged_plots = os.path.join(location_out_cleaned_plots, "double_flagged")
     location_out_double_flagged_plots_corrected = os.path.join(location_out_double_flagged_plots, "corrected")
     location_out_full_plots = os.path.join(location_out_cleaned_plots, "full")
@@ -223,5 +236,5 @@ def create_folder_structure(eoh_folder):
         os.mkdir(location_out_binned_temp_plots_flow)
     if not os.path.exists(location_out_cleaned_scored):
         os.mkdir(location_out_cleaned_scored)
-    
+
     return location, location_in_raw, location_out, location_out_cleaned
