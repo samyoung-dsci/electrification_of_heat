@@ -15,6 +15,13 @@
 # %% [markdown]
 # # Exploration of influence of cycling on ASHP performance
 # This builds some simple decision trees to see whether the cycling features can help diagnose causes for under performance. The models built here are not intended for actual deployment, but to aid understanding of performance in the EoH trial.
+#
+# The core finding is that a simple method of detecting cycles does a reasonable job of helping group heat pumps into intuitive categories (e.g. long cycles, low flow temperatures) that go some way to separating out causes of poor performance. Unsurprisingly, the best performing heat pumps have long cycles at low flow temperatures with only short gaps between them.
+#
+# I think a good next step would be to explicitly build (probably rule-based) features designed to detect:
+# - low flow temperatures but cycles are shortened because the heat pump can't operate at low enough power (oversized heat pump or min flow temperature needs raising)
+# - seperating out "high constant flow temp" from "ramping up flow temp" and using those to recommend an action when cycles are short and gaps are long (though do they have the same action - adjust weather compensation curve?)
+# - identifying high flow temp, long-ish cycle, short gap heat pumps, as these probably can't just tweak the flow temp
 
 # %%
 import pandas as pd
