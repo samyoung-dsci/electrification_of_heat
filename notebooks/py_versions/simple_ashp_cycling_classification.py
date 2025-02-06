@@ -98,7 +98,7 @@ dot_data_reg = dot_data_reg.replace("digraph Tree {", 'digraph Tree {\nlabel="De
 
 # Create and display the graph
 graph_reg = graphviz.Source(dot_data_reg)
-graph.render("Decision Tree Regressor", format="png")
+graph_reg.render("Decision Tree Regressor", format="png")
 graph_reg
 
 # %%
