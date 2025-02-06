@@ -25,10 +25,6 @@ def prep_readings(readings, power_floor=100, winter_only=True):
         pd.DataFrame: Processed DataFrame with additional computed columns:
             - 'Power_W': Instantaneous power in watts, derived from cumulative consumption.
             - 'Heat_Pump_Power_Output': Instantaneous heat pump power output in watts.
-            - 'on': Binary indicator for whether power consumption exceeds `power_floor`.
-            - 'on_smooth': Smoothed version of 'on' to reduce transient fluctuations.
-            - 'group': Identifier for consecutive periods of the same state.
-            - 'position': Position within each identified state group.
     """
     # Ensure Timestamp is in datetime format
     readings['Timestamp'] = pd.to_datetime(readings['Timestamp'])
@@ -52,17 +48,38 @@ def prep_readings(readings, power_floor=100, winter_only=True):
     if winter_only:
         readings = readings[readings.index.month.isin([1,2,12])]
 
-    # Step 1: Create the "on" column
+    return readings
+
+def flag_cycle_groups(readings):
+    """
+    Flags consecutive on/off periods that might consitute a cycle 
+    - Identifies when power consumption exceeds a given threshold (power_floor) and smooths transient switching states.
+    - Groups consecutive periods of similar states for further analysis.
+
+    Args:
+        readings (pd.DataFrame): A DataFrame containing energy readings with at least the following columns:
+            - 'Timestamp': The timestamp of each reading.
+            - 'Power_W': Instantaneous power in watts, derived from cumulative consumption.
+   
+    Returns:
+        pd.DataFrame: Processed DataFrame with additional computed columns:
+            - 'on': Binary indicator for whether power consumption exceeds `power_floor`.
+            - 'on_smooth': Smoothed version of 'on' to reduce transient fluctuations.
+            - 'group': Identifier for consecutive periods of the same state.
+            - 'position': Position within each identified state group.
+    """
+
+    # Create the "on" column
     readings['on'] = (readings['Power_W'] >= power_floor).astype(int)
 
-    # Step 2: Smooth transient states where a single period differs from adjacent states
+    # Smooth transient states where a single period differs from adjacent states
     readings['on_smooth'] = readings['on'].copy()
     readings['on_smooth'] = readings['on_smooth'].where(
         ~((readings['on'].shift(1) == readings['on'].shift(-1)) & (readings['on'] != readings['on'].shift(1))),
         readings['on'].shift(1)
     )
 
-    # Step 3: Identify groups of consecutive states
+    # Identify groups of consecutive states
     readings['group'] = (readings['on_smooth'].fillna(-1) != readings['on_smooth'].fillna(-1).shift()).cumsum()
     readings['position'] = readings.groupby('group').cumcount() + 1
 
@@ -186,7 +203,7 @@ def calc_cycling_features(cycles, max_power):
     mean_power = cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "mean_power"].mean().round(0)
     mean_modulation_pct = mean_power / max_power * 100
     median_cycles_per_day = cycles[cycles["state"]==1].groupby(cycles["start_time"].dt.date).count()["state"].median()
-
+    
     cycling_features = {"median_on_duration": median_on_duration,
                         "median_off_duration": median_off_duration,
                         "median_hw_duration": median_hw_duration,
@@ -200,6 +217,7 @@ def calc_cycling_features(cycles, max_power):
 
 def get_all_features(readings):
     readings = prep_readings(readings)
+    readings = flag_cycle_groups(readings)
     max_power = calc_max_power(readings)
     cycles = identify_cycles(readings)
     cycling_features = calc_cycling_features(cycles, max_power)
