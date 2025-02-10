@@ -50,7 +50,7 @@ def prep_readings(readings, power_floor=100, winter_only=True):
 
     return readings
 
-def flag_cycle_groups(readings):
+def flag_cycle_groups(readings, power_floor=100):
     """
     Flags consecutive on/off periods that might consitute a cycle 
     - Identifies when power consumption exceeds a given threshold (power_floor) and smooths transient switching states.
