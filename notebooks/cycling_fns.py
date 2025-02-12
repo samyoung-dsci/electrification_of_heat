@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 
-def prep_readings(readings, power_floor=100, winter_only=True):
+def prep_readings(readings, winter_only=True):
     """
     Prepares and processes heat pump consumption readings for analysis.
 
@@ -18,7 +18,6 @@ def prep_readings(readings, power_floor=100, winter_only=True):
             - 'Timestamp': The timestamp of each reading.
             - 'Whole_System_Energy_Consumed': Cumulative energy consumption in kWh.
             - 'Heat_Pump_Energy_Output': Cumulative energy output in kWh.
-        power_floor (int, optional): Minimum power threshold (in watts) to classify a system as "on". Defaults to 100 W.
         winter_only (bool, optional): Whether to filter data to only winter months (December, January, February). Defaults to True.
 
     Returns:
@@ -26,8 +25,9 @@ def prep_readings(readings, power_floor=100, winter_only=True):
             - 'Power_W': Instantaneous power in watts, derived from cumulative consumption.
             - 'Heat_Pump_Power_Output': Instantaneous heat pump power output in watts.
     """
+    readings = readings.copy()
     # Ensure Timestamp is in datetime format
-    readings['Timestamp'] = pd.to_datetime(readings['Timestamp'])
+    readings['Timestamp'] = pd.to_datetime(readings['Timestamp'], utc=True)
 
     # Set Timestamp as index
     readings.set_index('Timestamp', inplace=True)
@@ -50,7 +50,7 @@ def prep_readings(readings, power_floor=100, winter_only=True):
 
     return readings
 
-def flag_cycle_groups(readings, power_floor=100):
+def flag_cycle_groups(readings, power_floor=200):
     """
     Flags consecutive on/off periods that might consitute a cycle 
     - Identifies when power consumption exceeds a given threshold (power_floor) and smooths transient switching states.
@@ -85,7 +85,7 @@ def flag_cycle_groups(readings, power_floor=100):
 
     return readings
 
-def calc_max_power(readings, percentile=95, power_floor=100, power_ceiling=5000):
+def calc_max_power(readings, percentile=95, power_floor=200, power_ceiling=5000):
     """
     Calculates the maximum power for a heat pump based on a given percentile of valid power readings.
 
@@ -215,11 +215,38 @@ def calc_cycling_features(cycles, max_power):
     cycling_features = pd.Series(cycling_features)
     return cycling_features
 
-def get_all_features(readings):
+def get_all_features(readings, power_floor=200):
     readings = prep_readings(readings)
-    readings = flag_cycle_groups(readings)
-    max_power = calc_max_power(readings)
+    readings = flag_cycle_groups(readings, power_floor=power_floor)
+    max_power = calc_max_power(readings, power_floor=power_floor)
     cycles = identify_cycles(readings)
     cycling_features = calc_cycling_features(cycles, max_power)
+    median_internal_temp_winter = readings["Internal_Air_Temperature"].median()
+    tenth_pct_internal_temp_winter = np.percentile(readings["Internal_Air_Temperature"].dropna(), 10)
+    percentage_time_on = (readings["Power_W"] > 200).mean()
+    additional_features = pd.Series({'median_internal_temp_winter': median_internal_temp_winter,
+                                     'tenth_pct_internal_temp_winter': tenth_pct_internal_temp_winter,
+                                     'percentage_time_on': percentage_time_on})
+    cycling_features = pd.concat([cycling_features, additional_features])
 
     return cycling_features
+
+def get_annual_features(readings, selected_window_start, selected_window_end):
+    readings = prep_readings(readings, winter_only=False)
+    readings = readings[selected_window_start:selected_window_end]
+    readings["hot_water"] = readings["Hot_Water_Flow_Temperature"].notna()
+    
+    hot_water_usage = readings.loc[(readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)]
+    heating_usage = readings.loc[~(readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)]
+
+    hot_water_energy_usage = hot_water_usage["Heat_Pump_Power_Output"].sum() / 30 / 1000
+    heating_energy_usage = heating_usage["Heat_Pump_Power_Output"].sum() / 30 / 1000
+
+    readings["combined_flow_temperature"] = readings["Heat_Pump_Heating_Flow_Temperature"].fillna(readings["Hot_Water_Flow_Temperature"])
+    weighted_flow_temperature = (readings["combined_flow_temperature"] * readings["Heat_Pump_Power_Output"]).mean() / readings["Heat_Pump_Power_Output"].mean()
+
+    features = pd.Series({"annual_hot_water_demand": hot_water_energy_usage,
+                        "annual_heating_demand": heating_energy_usage,
+                        "power_weighted_flow_temperature":weighted_flow_temperature})
+    return features
+
