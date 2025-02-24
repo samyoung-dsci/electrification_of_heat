@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 
+
 def prep_readings(readings, winter_only=True):
     """
     Prepares and processes heat pump consumption readings for analysis.
@@ -27,13 +28,15 @@ def prep_readings(readings, winter_only=True):
     """
     readings = readings.copy()
     # Ensure Timestamp is in datetime format
-    readings['Timestamp'] = pd.to_datetime(readings['Timestamp'], utc=True)
+    readings["Timestamp"] = pd.to_datetime(readings["Timestamp"], utc=True)
 
     # Set Timestamp as index
-    readings.set_index('Timestamp', inplace=True)
+    readings.set_index("Timestamp", inplace=True)
 
     # Create a full range of timestamps every 2 minutes
-    full_range = pd.date_range(start=readings.index.min(), end=readings.index.max(), freq='2T')
+    full_range = pd.date_range(
+        start=readings.index.min(), end=readings.index.max(), freq="2T"
+    )
 
     # Reindex to fill missing timestamps with NaN
     readings = readings.reindex(full_range)
@@ -41,19 +44,23 @@ def prep_readings(readings, winter_only=True):
     # Do not interpolate missing energy values, keep NaN
 
     # Convert cumulative kWh to non-cumulative kWh (differencing)
-    readings['Power_W'] = readings['Whole_System_Energy_Consumed'].diff() * 30 * 1000
-    readings['Heat_Pump_Power_Output'] = readings['Heat_Pump_Energy_Output'].diff() * 30 * 1000
+    readings["Power_W"] = readings["Whole_System_Energy_Consumed"].diff() * 30 * 1000
+    readings["Heat_Pump_Power_Output"] = (
+        readings["Heat_Pump_Energy_Output"].diff() * 30 * 1000
+    )
 
     # Filter to Winter data only
     if winter_only:
-        readings = readings[readings.index.month.isin([1,2,12])]
+        readings = readings[readings.index.month.isin([1, 2, 12])]
 
     return readings
+
 
 def flag_cycle_groups(readings, power_floor=200):
     """
     Flags consecutive on/off periods that might consitute a cycle 
     - Identifies when power consumption exceeds a given threshold (power_floor) and smooths transient switching states.
+    - Also treats drops of >5C in flow temperature as turning off
     - Groups consecutive periods of similar states for further analysis.
 
     Args:
@@ -64,26 +71,58 @@ def flag_cycle_groups(readings, power_floor=200):
     Returns:
         pd.DataFrame: Processed DataFrame with additional computed columns:
             - 'on': Binary indicator for whether power consumption exceeds `power_floor`.
-            - 'on_smooth': Smoothed version of 'on' to reduce transient fluctuations.
             - 'group': Identifier for consecutive periods of the same state.
             - 'position': Position within each identified state group.
     """
 
     # Create the "on" column
-    readings['on'] = (readings['Power_W'] >= power_floor).astype(int)
+    readings["on"] = (readings["Power_W"] >= power_floor).astype(int)
 
-    # Smooth transient states where a single period differs from adjacent states
-    readings['on_smooth'] = readings['on'].copy()
-    readings['on_smooth'] = readings['on_smooth'].where(
-        ~((readings['on'].shift(1) == readings['on'].shift(-1)) & (readings['on'] != readings['on'].shift(1))),
-        readings['on'].shift(1)
-    )
+    # If the flow temperature has dropped more than 5C relative to the previous two periods then treat it as an 'off'
+    readings.loc[
+        (readings["on"] == 1)
+        & (
+            (
+                readings["Heat_Pump_Heating_Flow_Temperature"]
+                - (
+                    readings["Heat_Pump_Heating_Flow_Temperature"].shift(1)
+                    + readings["Heat_Pump_Heating_Flow_Temperature"].shift(2)
+                )
+                / 2
+            )
+            <= -5
+        ),
+        "on",
+    ] = 0
+
+    # If the flow minus return temperature is less than 1C, treat it as an 'off'
+    readings.loc[
+        (readings["on"] == 1)
+        & (
+            readings["Heat_Pump_Heating_Flow_Temperature"]
+            - readings["Heat_Pump_Return_Temperature"]
+            <= 0.2
+        ),
+        "on",
+    ] = 0
+
+    # Smooth transient states where a single 'on' period is surrounded by 'off'
+    # Single 'off' states are more likely to be real, so leave those alone
+    readings.loc[
+        (readings["on"] == 1)
+        & (readings["on"].shift(1) == 0)
+        & (readings["on"].shift(-1) == 0),
+        "on",
+    ] = 0
 
     # Identify groups of consecutive states
-    readings['group'] = (readings['on_smooth'].fillna(-1) != readings['on_smooth'].fillna(-1).shift()).cumsum()
-    readings['position'] = readings.groupby('group').cumcount() + 1
+    readings["group"] = (
+        readings["on"].fillna(-1) != readings["on"].fillna(-1).shift()
+    ).cumsum()
+    readings["position"] = readings.groupby("group").cumcount() + 1
 
     return readings
+
 
 def calc_max_power(readings, percentile=95, power_floor=200, power_ceiling=5000):
     """
@@ -99,9 +138,12 @@ def calc_max_power(readings, percentile=95, power_floor=200, power_ceiling=5000)
     Returns:
         float: The computed power threshold at the specified percentile, rounded to the nearest 10 watts.
     """
-    sensible_power = readings.loc[(readings["Power_W"] >= power_floor) & (readings["Power_W"] <= power_ceiling)].copy()
+    sensible_power = readings.loc[
+        (readings["Power_W"] >= power_floor) & (readings["Power_W"] <= power_ceiling)
+    ].copy()
     max_power = np.percentile(sensible_power["Power_W"], percentile).round(-1)
     return max_power
+
 
 def identify_cycles(readings):
     """
@@ -143,31 +185,48 @@ def identify_cycles(readings):
     """
 
     # Group by the identified state periods
-    cycles = readings.groupby('group').agg(
-        state=('on_smooth', 'first'),
-        start_time=('Power_W', lambda x: x.index.min()),
-        duration=('Power_W', lambda x: (x.index.max() - x.index.min()).total_seconds() / 60),
-        max_power=('Power_W', 'max'),
-        min_power=('Power_W', 'min'),
-        mean_power=('Power_W', 'mean'),
-        std_power=('Power_W', 'std'),
-        max_heat_temp=('Heat_Pump_Heating_Flow_Temperature', 'max'),
-        min_heat_temp=('Heat_Pump_Heating_Flow_Temperature', 'min'),
-        median_heat_temp=('Heat_Pump_Heating_Flow_Temperature', 'median'),
-        std_heat_temp=('Heat_Pump_Heating_Flow_Temperature', 'std'),
-        max_hot_water_temp=('Hot_Water_Flow_Temperature', 'max'),
-        min_hot_water_temp=('Hot_Water_Flow_Temperature', 'min'),
-        median_hot_water_temp=('Hot_Water_Flow_Temperature', 'median'),
-        std_hot_water_temp=('Hot_Water_Flow_Temperature', 'std')
-    ).reset_index(drop=True)
+    cycles = (
+        readings.groupby("group")
+        .agg(
+            state=("on", "first"),
+            start_time=("Power_W", lambda x: x.index.min()),
+            duration=(
+                "Power_W",
+                lambda x: (x.index.max() - x.index.min()).total_seconds() / 60,
+            ),
+            max_power=("Power_W", "max"),
+            min_power=("Power_W", "min"),
+            mean_power=("Power_W", "mean"),
+            std_power=("Power_W", "std"),
+            max_heat_temp=("Heat_Pump_Heating_Flow_Temperature", "max"),
+            min_heat_temp=("Heat_Pump_Heating_Flow_Temperature", "min"),
+            median_heat_temp=("Heat_Pump_Heating_Flow_Temperature", "median"),
+            mean_external_temp=("External_Air_Temperature", "mean"),
+            mean_internal_temp=("Internal_Air_Temperature", "mean"),
+            std_heat_temp=("Heat_Pump_Heating_Flow_Temperature", "std"),
+            max_hot_water_temp=("Hot_Water_Flow_Temperature", "max"),
+            min_hot_water_temp=("Hot_Water_Flow_Temperature", "min"),
+            median_hot_water_temp=("Hot_Water_Flow_Temperature", "median"),
+            std_hot_water_temp=("Hot_Water_Flow_Temperature", "std"),
+            heat_temp_diff=(
+                "Heat_Pump_Heating_Flow_Temperature",
+                lambda x: x.iloc[-2] - x.iloc[1] if len(x) > 2 else None,
+            ),
+        )
+        .reset_index(drop=True)
+    )
 
     cycles["hot_water"] = cycles["max_hot_water_temp"].notna()
 
-    cycles = cycles[cycles["max_power"].notna() & (cycles["max_heat_temp"].notna() | cycles["max_hot_water_temp"].notna())]
+    cycles = cycles[
+        cycles["max_power"].notna()
+        & (cycles["max_heat_temp"].notna() | cycles["max_hot_water_temp"].notna())
+    ]
 
     cycles["temp_change"] = cycles["max_heat_temp"] - cycles["min_heat_temp"]
 
     return cycles
+
 
 def calc_cycling_features(cycles, max_power):
     """
@@ -195,25 +254,49 @@ def calc_cycling_features(cycles, max_power):
         - Heating cycles are considered separately from hot water cycles.
     """
 
-    median_on_duration = cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "duration"].median()
+    median_on_duration = cycles.loc[
+        (cycles["state"] == 1) & (~cycles["hot_water"]), "duration"
+    ].median()
     median_off_duration = cycles.loc[cycles["state"] == 0, "duration"].median()
-    median_hw_duration = cycles.loc[(cycles["state"] == 1) & (cycles["hot_water"]), "duration"].median()
-    median_flow_temp = cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "median_heat_temp"].median()
-    median_temp_change = cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "temp_change"].median()
-    mean_power = cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "mean_power"].mean().round(0)
+    median_hw_duration = cycles.loc[
+        (cycles["state"] == 1) & (cycles["hot_water"]), "duration"
+    ].median()
+    median_flow_temp = cycles.loc[
+        (cycles["state"] == 1) & (~cycles["hot_water"]), "median_heat_temp"
+    ].median()
+    median_temp_change = cycles.loc[
+        (cycles["state"] == 1) & (~cycles["hot_water"]), "temp_change"
+    ].median()
+    median_heat_temp_diff = cycles.loc[
+        (cycles["state"] == 1) & (~cycles["hot_water"]), "heat_temp_diff"
+    ].median()
+    mean_power = (
+        cycles.loc[(cycles["state"] == 1) & (~cycles["hot_water"]), "mean_power"]
+        .mean()
+        .round(0)
+    )
     mean_modulation_pct = mean_power / max_power * 100
-    median_cycles_per_day = cycles[cycles["state"]==1].groupby(cycles["start_time"].dt.date).count()["state"].median()
-    
-    cycling_features = {"median_on_duration": median_on_duration,
-                        "median_off_duration": median_off_duration,
-                        "median_hw_duration": median_hw_duration,
-                        "median_flow_temp": median_flow_temp,
-                        "median_temp_change": median_temp_change,
-                        "mean_power": mean_power,
-                        "mean_modulation_pct": mean_modulation_pct,
-                        "median_cycles_per_day": median_cycles_per_day}
+    median_cycles_per_day = (
+        cycles[cycles["state"] == 1]
+        .groupby(cycles["start_time"].dt.date)
+        .count()["state"]
+        .median()
+    )
+
+    cycling_features = {
+        "median_on_duration": median_on_duration,
+        "median_off_duration": median_off_duration,
+        "median_hw_duration": median_hw_duration,
+        "median_flow_temp": median_flow_temp,
+        "median_temp_change": median_temp_change,
+        "median_heat_temp_diff": median_heat_temp_diff,
+        "mean_power": mean_power,
+        "mean_modulation_pct": mean_modulation_pct,
+        "median_cycles_per_day": median_cycles_per_day,
+    }
     cycling_features = pd.Series(cycling_features)
     return cycling_features
+
 
 def get_all_features(readings, power_floor=200):
     readings = prep_readings(readings)
@@ -222,31 +305,56 @@ def get_all_features(readings, power_floor=200):
     cycles = identify_cycles(readings)
     cycling_features = calc_cycling_features(cycles, max_power)
     median_internal_temp_winter = readings["Internal_Air_Temperature"].median()
-    tenth_pct_internal_temp_winter = np.percentile(readings["Internal_Air_Temperature"].dropna(), 10)
+    tenth_pct_internal_temp_winter = np.percentile(
+        readings["Internal_Air_Temperature"].dropna(), 10
+    )
     percentage_time_on = (readings["Power_W"] > 200).mean()
-    additional_features = pd.Series({'median_internal_temp_winter': median_internal_temp_winter,
-                                     'tenth_pct_internal_temp_winter': tenth_pct_internal_temp_winter,
-                                     'percentage_time_on': percentage_time_on})
+    additional_features = pd.Series(
+        {
+            "median_internal_temp_winter": median_internal_temp_winter,
+            "tenth_pct_internal_temp_winter": tenth_pct_internal_temp_winter,
+            "percentage_time_on": percentage_time_on,
+        }
+    )
     cycling_features = pd.concat([cycling_features, additional_features])
 
     return cycling_features
+
 
 def get_annual_features(readings, selected_window_start, selected_window_end):
     readings = prep_readings(readings, winter_only=False)
     readings = readings[selected_window_start:selected_window_end]
     readings["hot_water"] = readings["Hot_Water_Flow_Temperature"].notna()
-    
-    hot_water_usage = readings.loc[(readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)]
-    heating_usage = readings.loc[~(readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)]
+
+    hot_water_usage = readings.loc[
+        (readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)
+    ]
+    heating_usage = readings.loc[
+        ~(readings["hot_water"]) & (readings["Heat_Pump_Power_Output"] > 0)
+    ]
 
     hot_water_energy_usage = hot_water_usage["Heat_Pump_Power_Output"].sum() / 30 / 1000
     heating_energy_usage = heating_usage["Heat_Pump_Power_Output"].sum() / 30 / 1000
 
-    readings["combined_flow_temperature"] = readings["Heat_Pump_Heating_Flow_Temperature"].fillna(readings["Hot_Water_Flow_Temperature"])
-    weighted_flow_temperature = (readings["combined_flow_temperature"] * readings["Heat_Pump_Power_Output"]).mean() / readings["Heat_Pump_Power_Output"].mean()
+    max_flow_temp = readings["Heat_Pump_Heating_Flow_Temperature"].max()
+    flow_temp_99th_pct = np.percentile(
+        readings["Heat_Pump_Heating_Flow_Temperature"].dropna(), 99
+    )
 
-    features = pd.Series({"annual_hot_water_demand": hot_water_energy_usage,
-                        "annual_heating_demand": heating_energy_usage,
-                        "power_weighted_flow_temperature":weighted_flow_temperature})
+    readings["combined_flow_temperature"] = readings[
+        "Heat_Pump_Heating_Flow_Temperature"
+    ].fillna(readings["Hot_Water_Flow_Temperature"])
+    weighted_flow_temperature = (
+        readings["combined_flow_temperature"] * readings["Heat_Pump_Power_Output"]
+    ).mean() / readings["Heat_Pump_Power_Output"].mean()
+
+    features = pd.Series(
+        {
+            "annual_hot_water_demand": hot_water_energy_usage,
+            "annual_heating_demand": heating_energy_usage,
+            "power_weighted_flow_temperature": weighted_flow_temperature,
+            "max_flow_temp": max_flow_temp,
+            "flow_temp_99th_pct": flow_temp_99th_pct,
+        }
+    )
     return features
-
